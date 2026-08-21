@@ -1,6 +1,13 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import type { Session, User } from "@supabase/supabase-js";
+import { onIdTokenChanged, signOut as firebaseSignOut } from "firebase/auth";
 import { supabase } from "@/lib/supabaseClient";
+import { firebaseAuth } from "@/lib/firebase";
+import {
+  type AppAuthUser,
+  getSupabaseSession,
+  signInSupabaseWithGoogleIdToken,
+  toAppAuthUser,
+} from "@/lib/firebaseAuthAdapter";
 
 interface Profile {
   display_name: string | null;
@@ -9,8 +16,8 @@ interface Profile {
 }
 
 interface AuthContextValue {
-  session: Session | null;
-  user: User | null;
+  session: { firebase_uid: string; supabase_user_id: string | null } | null;
+  user: AppAuthUser | null;
   profile: Profile | null;
   loading: boolean;
   signOut: () => Promise<void>;
@@ -25,45 +32,44 @@ const AuthContext = createContext<AuthContextValue>({
 });
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  const [session, setSession] = useState<Session | null>(null);
-  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<{ firebase_uid: string; supabase_user_id: string | null } | null>(null);
+  const [user, setUser] = useState<AppAuthUser | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let mounted = true;
 
-    const apply = (sess: Session | null) => {
+    const unsub = onIdTokenChanged(firebaseAuth, async (firebaseUser) => {
       if (!mounted) return;
-      setSession(sess);
-      setUser(sess?.user ?? null);
-      if (!sess?.user) setProfile(null);
-    };
 
-    // Subscribe FIRST so we never miss SIGNED_IN events fired during init
-    // (e.g. from AuthCallback's exchangeCodeForSession).
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
-      apply(sess);
-      // Once any auth event fires, we've finished initializing.
-      if (mounted) setLoading(false);
-    });
+      if (!firebaseUser) {
+        setSession(null);
+        setUser(null);
+        setProfile(null);
+        setLoading(false);
+        return;
+      }
 
-    // Then restore any persisted session from storage.
-    supabase.auth
-      .getSession()
-      .then(({ data }) => {
-        apply(data.session);
-      })
-      .catch(() => {
-        /* ignore */
-      })
-      .finally(() => {
+      try {
+        let supabaseSession = await getSupabaseSession();
+
+        if (!supabaseSession && firebaseUser.providerData.some((p) => p.providerId === "google.com")) {
+          const idToken = await firebaseUser.getIdToken();
+          supabaseSession = await signInSupabaseWithGoogleIdToken(idToken);
+        }
+
+        const appUser = toAppAuthUser(firebaseUser, supabaseSession?.user ?? null);
+        setSession({ firebase_uid: appUser.firebase_uid, supabase_user_id: appUser.supabase_user_id });
+        setUser(appUser);
+      } finally {
         if (mounted) setLoading(false);
-      });
+      }
+    });
 
     return () => {
       mounted = false;
-      sub.subscription.unsubscribe();
+      unsub();
     };
   }, []);
 
@@ -72,11 +78,15 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     if (!user) return;
     let active = true;
     setTimeout(async () => {
-      const { data } = await supabase
-        .from("profiles")
-        .select("display_name, avatar_url, email")
-        .eq("user_id", user.id)
-        .maybeSingle();
+      let query = supabase.from("profiles").select("display_name, avatar_url, email");
+      if (user.supabase_user_id) {
+        query = query.eq("user_id", user.supabase_user_id);
+      } else if (user.email) {
+        query = query.eq("email", user.email);
+      } else {
+        return;
+      }
+      const { data } = await query.maybeSingle();
       if (active && data) setProfile(data as Profile);
     }, 0);
     return () => {
@@ -93,6 +103,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     } catch {
       /* ignore */
     }
+    await firebaseSignOut(firebaseAuth).catch(() => {});
     await supabase.auth.signOut();
     window.location.href = "/login";
   };

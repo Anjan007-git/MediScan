@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { supabase } from "@/lib/supabaseClient";
+import { sendPasswordResetEmail } from "firebase/auth";
 import { useToast } from "@/hooks/use-toast";
+import { firebaseAuth } from "@/lib/firebase";
 import { Mail, Loader2, ArrowLeft } from "lucide-react";
 
 const ForgotPassword = () => {
@@ -9,19 +10,19 @@ const ForgotPassword = () => {
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
+  const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : "Please try again.");
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/reset-password`,
+      await sendPasswordResetEmail(firebaseAuth, email, {
+        url: `${window.location.origin}/reset-password`,
       });
-      if (error) throw error;
       setSent(true);
       toast({ title: "Email sent", description: "Check your inbox for a reset link." });
-    } catch (err: any) {
-      toast({ title: "Failed", description: err?.message, variant: "destructive" });
+    } catch (err: unknown) {
+      toast({ title: "Failed", description: getErrorMessage(err), variant: "destructive" });
     } finally {
       setBusy(false);
     }
