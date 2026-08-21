@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { supabase } from "@/lib/supabaseClient";
+import { confirmPasswordReset, verifyPasswordResetCode } from "firebase/auth";
 import { useToast } from "@/hooks/use-toast";
+import { firebaseAuth } from "@/lib/firebase";
 import { Lock, Loader2 } from "lucide-react";
 
 const ResetPassword = () => {
@@ -10,45 +11,32 @@ const ResetPassword = () => {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
+  const [oobCode, setOobCode] = useState<string | null>(null);
+  const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : "Please try again.");
 
   useEffect(() => {
-    let cancelled = false;
-
-    const verifyRecoverySession = async () => {
-      const code = new URL(window.location.href).searchParams.get("code");
-      if (code) {
-        const { error } = await supabase.auth.exchangeCodeForSession(code);
-        if (!error && !cancelled) setReady(true);
-        return;
-      }
-
-      const { data } = await supabase.auth.getSession();
-      if (data.session && !cancelled) setReady(true);
-    };
-
-    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
-      if (!cancelled && (event === "PASSWORD_RECOVERY" || event === "SIGNED_IN")) setReady(true);
-    });
-
-    verifyRecoverySession();
-
-    return () => {
-      cancelled = true;
-      sub.subscription.unsubscribe();
-    };
+    const urlCode = new URL(window.location.href).searchParams.get("oobCode");
+    if (!urlCode) return;
+    verifyPasswordResetCode(firebaseAuth, urlCode)
+      .then(() => {
+        setOobCode(urlCode);
+        setReady(true);
+      })
+      .catch(() => {
+        setReady(false);
+      });
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!oobCode) return;
     setBusy(true);
     try {
-      const { error } = await supabase.auth.updateUser({ password });
-      if (error) throw error;
+      await confirmPasswordReset(firebaseAuth, oobCode, password);
       toast({ title: "Password updated", description: "You can now sign in." });
-      await supabase.auth.signOut();
       navigate("/login", { replace: true });
-    } catch (err: any) {
-      toast({ title: "Failed", description: err?.message, variant: "destructive" });
+    } catch (err: unknown) {
+      toast({ title: "Failed", description: getErrorMessage(err), variant: "destructive" });
     } finally {
       setBusy(false);
     }

@@ -1,8 +1,22 @@
 import { useState, useEffect } from "react";
 import { useNavigate, Link, useLocation } from "react-router-dom";
+import {
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+  updateProfile,
+} from "firebase/auth";
 import { supabase } from "@/lib/supabaseClient";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
+import { firebaseAuth, googleProvider } from "@/lib/firebase";
+import {
+  signInSupabaseWithEmail,
+  signInSupabaseWithGoogleIdToken,
+  signUpSupabaseWithEmail,
+} from "@/lib/firebaseAuthAdapter";
 import { Loader2, Mail, Lock, ShieldCheck, Sparkles, Eye, EyeOff } from "lucide-react";
 
 const Login = () => {
@@ -32,19 +46,22 @@ const Login = () => {
     setBusy(true);
     try {
       if (mode === "signup") {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            emailRedirectTo: `${window.location.origin}/auth/callback`,
-            data: { full_name: name || email.split("@")[0] },
-          },
-        });
-        if (error) throw error;
+        const fullName = name.trim() || email.split("@")[0];
+        const creds = await createUserWithEmailAndPassword(firebaseAuth, email, password);
+        await updateProfile(creds.user, { displayName: fullName }).catch(() => {});
+        await signUpSupabaseWithEmail(email, password, fullName);
+        await sendEmailVerification(creds.user).catch(() => {});
+        await signOut(firebaseAuth).catch(() => {});
+        await supabase.auth.signOut();
         toast({ title: "Check your email", description: "Confirm your email to finish signing up." });
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        await signInWithEmailAndPassword(firebaseAuth, email, password);
+        try {
+          await signInSupabaseWithEmail(email, password);
+        } catch (error) {
+          await signOut(firebaseAuth).catch(() => {});
+          throw error;
+        }
         navigate(redirectAfterLogin, { replace: true });
       }
     } catch (err: unknown) {
@@ -62,22 +79,12 @@ const Login = () => {
     if (busy) return;
     setBusy(true);
     try {
-      try { localStorage.setItem("mediscan-auth-redirect", redirectAfterLogin); } catch { /* ignore */ }
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: {
-          redirectTo: `${window.location.origin}/auth/callback`,
-          queryParams: {
-            prompt: "select_account",
-          },
-        },
-      });
-      if (error) {
-        toast({ title: "Google sign-in failed", description: error.message, variant: "destructive" });
-        setBusy(false);
-        return;
-      }
+      const result = await signInWithPopup(firebaseAuth, googleProvider);
+      const idToken = await result.user.getIdToken();
+      await signInSupabaseWithGoogleIdToken(idToken);
+      navigate(redirectAfterLogin, { replace: true });
     } catch (err: unknown) {
+      await signOut(firebaseAuth).catch(() => {});
       toast({ title: "Google sign-in failed", description: getErrorMessage(err), variant: "destructive" });
       setBusy(false);
     }
